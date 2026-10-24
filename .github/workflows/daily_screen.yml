@@ -1,0 +1,57 @@
+name: A股量化大阳筛选
+on:
+  schedule:
+    - cron: '50 8 * * 1-5'   # UTC 8:50 = 北京时间 16:50 首跑
+    - cron: '10 9 * * 1-5'   # UTC 9:10 = 北京时间 17:10 补跑
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RETRY_MODE: ${{ github.event.schedule == '10 9 * * 1-5' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 补跑前检查首跑是否已成功
+        if: env.RETRY_MODE == '1'
+        id: guard
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner, repo: context.repo.repo,
+              workflow_id: 'daily_screen.yml', event: 'schedule', per_page: 30
+            });
+            const today = new Date().toISOString().slice(0, 10);
+            const ok = runs.data.workflow_runs.some(r => {
+              const c = new Date(r.created_at);
+              const hm = c.getUTCHours() * 60 + c.getUTCMinutes();
+              return c.toISOString().slice(0, 10) === today &&
+                     hm >= 8 * 60 + 45 && hm <= 9 * 60 &&
+                     r.conclusion === 'success';
+            });
+            core.setOutput('skip', ok ? 'true' : 'false');
+            core.info(`首跑已成功: ${ok}`);
+
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.skip != 'true'
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        if: steps.guard.outputs.skip != 'true'
+        run: pip install -r requirements.txt
+
+      - name: Run screening
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+        run: python main.py
